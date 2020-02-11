@@ -28,7 +28,7 @@
     "url": "https://github.com/foxriver76/ioBroker.xbox"
   },
   "dependencies": {
-    "request": "^2.88.0",
+    "request": "^2.88.2",
     "ping": "^0.2.2",
     "nopy": "^0.2.6",
     "@iobroker/adapter-core": "^2.0.0"
