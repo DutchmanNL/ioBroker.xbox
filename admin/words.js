@@ -48,7 +48,8 @@ systemDictionary = {
         "it": `Indirizzo email`,
         "es": `Dirección de correo electrónico`,
         "pl": `Adres e-mail`,
-        "zh-cn": `电子邮件地址`    },
+        "zh-cn": `电子邮件地址`
+    },
     'Password': {
         "en": `Password`,
         "de": `Passwort`,

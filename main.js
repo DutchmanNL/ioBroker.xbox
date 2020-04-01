@@ -9,6 +9,10 @@ const helper = require(`${__dirname}/lib/utils`);
 const request = require(`request`);
 const ping = require(`ping`);
 const os = require(`os`).platform();
+const Smartglass = require(`xbox-smartglass-core-node`);
+const sgClient = Smartglass();
+const SystemInputChannel = require(`xbox-smartglass-core-node/src/channels/systeminput`);
+const SystemMediaChannel = require(`xbox-smartglass-core-node/src/channels/systemmedia`);
 
 const restServerAddress = `localhost`; // host of the REST server
 let liveId;
@@ -17,7 +21,6 @@ let mail;
 let password;
 let authenticate;
 let blockXbox = false;
-let tryPowerOn = false;
 let xboxPingable = false;
 let firstReconnectAttempt = true;
 let xboxAvailable = false;
@@ -130,6 +133,10 @@ function startAdapter(options) {
             adapter.log.info(`[START] Starting REST server`);
         } // endElse
 
+        // add needed Channels
+        sgClient.addManager(`system_input`, SystemInputChannel());
+        sgClient.addManager(`system_media`, SystemMediaChannel());
+
         helper.startRestServer().catch((err) => {
             adapter.log.error(`[START] Failed starting REST server: ${err}`);
             adapter.log.error(`[START] Restarting adapter in 30 seconds`);
@@ -164,6 +171,7 @@ function main() {
         clearTimeout(startTimer);
         startTimer = null;
     }
+
     adapter.subscribeStates(`*`);
 
     // Authenticate on Xbox Live, make sure to be logged out first
@@ -190,8 +198,12 @@ function main() {
                 if (xboxAvailable) adapter.setStateChanged(`settings.power`, true, true);
 
                 xboxPingable = true;
-                if (isAlive) adapter.log.debug(`[PING] Xbox online`);
-                else adapter.log.debug(`[PING] Xbox offline, but marked available`);
+                if (isAlive) {
+                    adapter.log.debug(`[PING] Xbox online`);
+                } else {
+                    adapter.log.debug(`[PING] Xbox offline, but marked available`);
+                }
+
                 connect(ip).then(connectionState => { // check if connection is (still) established
                     if (connectionState === `Connected`) {
                         request(`http://${restServerAddress}:5557/device/${liveId}/console_status`, (error, response, body) => {
@@ -251,104 +263,102 @@ function main() {
 
 } // endMain
 
-function connect(ip) {
-    return new Promise(resolve => {
-        discoverAndUpdateConsole(ip).then(result => {
-            const statusURL = `http://${restServerAddress}:5557/device/${liveId}/connect`;
+async function connect(ip) {
+    const result = await discoverAndUpdateConsole(ip);
+    const statusURL = `http://${restServerAddress}:5557/device/${liveId}/connect`;
 
-            adapter.log.debug(`[CONNECT] Check connection`);
+    adapter.log.debug(`[CONNECT] Check connection`);
 
-            if (result.connectionState === `Error`) {
-                adapter.log.warn(`[CONNECT] Error with rest server, restarting adapter`);
-                return restartAdapter();
-            } // endIf
+    if (result.connectionState === `Error`) {
+        adapter.log.warn(`[CONNECT] Error with rest server, restarting adapter`);
+        return restartAdapter();
+    } // endIf
 
-            // Set device status to var to not only rely on ping to check if Xbox is online
-            xboxAvailable = result.device && result.device.device_status === `Available`;
+    if (!sgClient.isConnected()) {
+        try {
+            await sgClient.connect();
+            adapter.log.info(`[CONNECT] Client connected`);
+        } catch (e) {
+            if (firstReconnectAttempt) {
+                adapter.log.warn(`[CONNECT] Ping response, but connection refused`);
+            }
+        }
+    } // endIf
 
-            if (result.connectionState && result.connectionState !== `Disconnected`) {
-                adapter.getStateAsync(`info.connection`).then(state => {
-                    if (state.val && result.connectionState === `Connected`) {
-                        adapter.log.debug(`[CONNECT] Still connected`);
-                    } else if (result.connectionState === `Connecting`) {
-                        adapter.log.debug(`[CONNECT] Currently connecting`);
-                    } else {
-                        adapter.setState(`info.connection`, true, true);
-                        adapter.log.info(`[CONNECT] <=== Successfully connected to ${liveId} (${result.device.address})`);
-                    } // endIf
+    // Set device status to var to not only rely on ping to check if Xbox is online
+    xboxAvailable = result.device && result.device.device_status === `Available`;
 
-                    resolve(result.connectionState);
-                });
-            } else {
-                adapter.getStateAsync(`info.connection`).then(state => {
-                    if (!state || state.val) {
-                        adapter.setState(`info.connection`, false, true);
-                        adapter.setState(`info.activeTitleImage`, ``, true);
-                        adapter.setState(`info.activeTitleName`, ``, true);
-                        adapter.setState(`info.activeTitleId`, ``, true);
-                        adapter.setState(`info.currentTitles`, `{}`, true);
-                        adapter.setState(`info.activeTitleType`, ``, true);
-                        adapter.log.info(`[CONNECT] <=== Lost connection to your Xbox (${ip})`);
-                        firstReconnectAttempt = true;
-                    } // endIf
-                });
+    if (result.connectionState && result.connectionState !== `Disconnected`) {
+        const state = await adapter.getStateAsync(`info.connection`);
+        if (state.val && result.connectionState === `Connected`) {
+            adapter.log.debug(`[CONNECT] Still connected`);
+        } else if (result.connectionState === `Connecting`) {
+            adapter.log.debug(`[CONNECT] Currently connecting`);
+        } else {
+            adapter.setState(`info.connection`, true, true);
+            adapter.log.info(`[CONNECT] <=== Successfully connected to ${liveId} (${result.device.address})`);
+        } // endIf
 
-                if (liveId && result.device && result.device.device_status === `Available`) {
-                    request(statusURL, (error, response, body) => {
-                        if (!error) {
-                            if (JSON.parse(body).success) {
-                                adapter.setState(`info.connection`, true, true);
-                                adapter.log.info(`[CONNECT] <=== Successfully connected to ${liveId} (${result.device.address})`);
-                                result.connectionState = true;
-                            } else {
-                                if (firstReconnectAttempt)
-                                    adapter.log.warn(`[CONNECT] <=== Connection to your Xbox failed: ${JSON.parse(body).message}`);
-                                else
-                                    adapter.log.debug(`[CONNECT] <=== Connection to your Xbox failed: ${JSON.parse(body).message}`);
-                                adapter.setState(`info.connection`, false, true);
-                                result.connectionState = false;
-                            } //endElse
+        return Promise.resolve(result.connectionState);
+    } else {
+        const state = await adapter.getStateAsync(`info.connection`);
+        if (!state || state.val) {
+            adapter.setState(`info.connection`, false, true);
+            adapter.setState(`info.activeTitleImage`, ``, true);
+            adapter.setState(`info.activeTitleName`, ``, true);
+            adapter.setState(`info.activeTitleId`, ``, true);
+            adapter.setState(`info.currentTitles`, `{}`, true);
+            adapter.setState(`info.activeTitleType`, ``, true);
+            adapter.log.info(`[CONNECT] <=== Lost connection to your Xbox (${ip})`);
+            firstReconnectAttempt = true;
+        } // endIf
+
+        if (liveId && result.device && result.device.device_status === `Available`) {
+            return new Promise(resolve => {
+                request(statusURL, (error, response, body) => {
+                    if (!error) {
+                        if (JSON.parse(body).success) {
+                            adapter.setState(`info.connection`, true, true);
+                            adapter.log.info(`[CONNECT] <=== Successfully connected to ${liveId} (${result.device.address})`);
+                            result.connectionState = true;
                         } else {
-                            adapter.log.error(`[CONNECT] <=== ${error.message}`);
+                            if (firstReconnectAttempt)
+                                adapter.log.warn(`[CONNECT] <=== Connection to your Xbox failed: ${JSON.parse(body).message}`);
+                            else
+                                adapter.log.debug(`[CONNECT] <=== Connection to your Xbox failed: ${JSON.parse(body).message}`);
                             adapter.setState(`info.connection`, false, true);
                             result.connectionState = false;
-                            if (error.message.includes(`ECONNREFUSED`)) {
-                                adapter.log.error(`[CONNECT] REST server seems to be down, adapter will be restarted`);
-                                restartAdapter();
-                            } // endIf
-                        } // endElse
-                        resolve(result.connectionState);
-                    });
-                } else if (result.device && result.device.device_status === `Unavailable`) {
-                    adapter.log.debug(`[CONNECT] Console currently unavailable`);
-                } else if (firstReconnectAttempt) {
-                    adapter.log.warn(`[CONNECT] Ping response, but provided LiveID has not been discovered until now`);
-                    firstReconnectAttempt = false;
-                } else
-                    adapter.log.debug(`[CONNECT] Ping response, but provided LiveID has not been discovered until now`);
-            } // endElse
-        });
-    });
+                        } //endElse
+                    } else {
+                        adapter.log.error(`[CONNECT] <=== ${error.message}`);
+                        adapter.setState(`info.connection`, false, true);
+                        result.connectionState = false;
+                        if (error.message.includes(`ECONNREFUSED`)) {
+                            adapter.log.error(`[CONNECT] REST server seems to be down, adapter will be restarted`);
+                            restartAdapter();
+                        } // endIf
+                    } // endElse
+                    resolve(result.connectionState);
+                });
+            });
+        } else if (result.device && result.device.device_status === `Unavailable`) {
+            adapter.log.debug(`[CONNECT] Console currently unavailable`);
+        } else if (firstReconnectAttempt) {
+            adapter.log.warn(`[CONNECT] Ping response, but provided LiveID has not been discovered until now`);
+            firstReconnectAttempt = false;
+        } else
+            adapter.log.debug(`[CONNECT] Ping response, but provided LiveID has not been discovered until now`);
+    } // endElse
 } // endConnect
 
-function powerOff(liveId) {
-    return new Promise(resolve => {
-        const endpoint = `http://${restServerAddress}:5557/device/${liveId}/poweroff`;
+async function powerOff() {
+    try {
         adapter.log.debug(`[POWEROFF] Powering off Xbox (${ip})`);
-
-        request(endpoint, (error, response, body) => {
-            if (!error) {
-                if (JSON.parse(body).success) {
-                    adapter.log.debug(`[POWEROFF] <=== ${body}`);
-                } else {
-                    adapter.log.warn(`[POWEROFF] <=== ${body}`);
-                } //endElse
-            } else {
-                adapter.log.error(`[POWEROFF] <=== ${error.message}`);
-            } // endElse
-            resolve();
-        });
-    });
+        await sgClient.powerOff();
+        adapter.log.info(`[POWEROFF] Xbox succesfully powered off`);
+    } catch (e) {
+        adapter.log.error(`[POWEROFF] <=== ${e.error}`);
+    }
 } // endPowerOff
 
 function discoverAndUpdateConsole(ip) { // is used by connect
@@ -402,30 +412,15 @@ function discoverAndUpdateConsole(ip) { // is used by connect
     });
 } // endDiscover
 
-function powerOn() {
-    return new Promise(resolve => {
-        const endpoint = `http://${restServerAddress}:5557/device/${liveId}/poweron?addr=${ip}`;
-        if (!tryPowerOn) { // if Xbox isn't on after 17.5 seconds, stop trying
-            tryPowerOn = setTimeout(() => tryPowerOn = false, 17500);
-        } // endIf
-        adapter.log.debug(`[POWERON] Powering on console`);
+async function powerOn() {
+    try {
         blockXbox = true;
-
-        request(endpoint, (error/*, response, body*/) => {
-            if (error) adapter.log.error(`[REQUEST] <=== ${error.message}`);
-
-            if (!xboxPingable) {
-                if (tryPowerOn)
-                    powerOn();
-                else {
-                    adapter.log.warn(`[REQUEST] <=== Could not turn on Xbox`);
-                    blockXbox = false;
-                } // endElse
-            } else blockXbox = false; // unblock Box because on
-
-            resolve();
-        });
-    });
+        await sgClient.powerOn({live_id: liveId, tries: 5, ip: ip});
+        blockXbox = false;
+    } catch (e) {
+        adapter.log.warn(`[REQUEST] <=== Could not turn on Xbox`);
+        blockXbox = false;
+    }
 } // endPowerOn
 
 function handleStateChange(state, id) {
@@ -438,7 +433,7 @@ function handleStateChange(state, id) {
                 if (state) {
                     powerOn();
                 } else {
-                    powerOff(liveId);
+                    powerOff();
                 } // endElse
                 break;
             case `gamepad.rightShoulder`:
@@ -478,17 +473,18 @@ function handleStateChange(state, id) {
                 sendButton(`x`);
                 break;
             case `gamepad.dpadUp`:
-                sendButton(`dpad_up`);
+                sendButton(`up`);
                 break;
             case `gamepad.dpadDown`:
-                sendButton(`dpad_down`);
+                sendButton(`down`);
                 break;
             case `gamepad.dpadLeft`:
-                sendButton(`dpad_left`);
+                sendButton(`left`);
                 break;
             case `gamepad.dpadRight`:
-                sendButton(`dpad_right`);
+                sendButton(`right`);
                 break;
+            // clear not used
             case `gamepad.clear`:
                 sendButton(`clear`);
                 break;
@@ -502,7 +498,7 @@ function handleStateChange(state, id) {
                 sendMediaCmd(`record`);
                 break;
             case `media.playPause`:
-                sendMediaCmd(`play_pause`);
+                sendMediaCmd(`playpause`);
                 break;
             case `media.previousTrack`:
                 sendMediaCmd(`prev_track`);
@@ -556,35 +552,14 @@ function handleStateChange(state, id) {
     });
 } // endHandleStateChange
 
-function sendButton(button) {
-    return new Promise(resolve => {
-        const endpoint = `http://${restServerAddress}:5557/device/${liveId}/input/${button}`;
-
-        request(endpoint, (error, response, body) => {
-            if (error) adapter.log.error(`[REQUEST] <=== ${error.message}`);
-            else if (JSON.parse(body).success) {
-                adapter.log.debug(`[REQUEST] <=== Button ${button} acknowledged by REST-Server`);
-                resolve();
-            } else {
-                adapter.log.warn(`[REQUEST] <=== Button ${button} not acknowledged by REST-Server`);
-            } // endElse
-        });
-    });
+async function sendButton(button) {
+    await sgClient.getManager(`system_input`).sendCommand(button);
+    return Promise.resolve();
 } // endSendButton
 
-function sendMediaCmd(cmd) {
-    return new Promise(resolve => {
-        const endpoint = `http://${restServerAddress}:5557/device/${liveId}/media/${cmd}`;
-
-        request(endpoint, (error, response, body) => {
-            if (error) adapter.log.error(`[REQUEST] <=== ${error.message}`);
-            else if (JSON.parse(body).success)
-                adapter.log.debug(`[REQUEST] <=== Media command ${cmd} acknowledged by REST-Server`);
-            else
-                adapter.log.warn(`[REQUEST] <=== Media command ${cmd} not acknowledged by REST-Server`);
-            resolve();
-        });
-    });
+async function sendMediaCmd(cmd) {
+    await sgClient.getManager(`system_media`).sendCommand(cmd);
+    return Promise.resolve();
 } // endSendMediaCmd
 
 function sendCustomCommand(endpoint) {
